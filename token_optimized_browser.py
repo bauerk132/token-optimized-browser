@@ -34,32 +34,30 @@ import os
 import re
 import shutil
 import socket
-import sys
 import time
-from dataclasses import asdict, dataclass, field
-from typing import Any, Callable, Dict, List, Optional, Tuple, Union
+from dataclasses import asdict, dataclass
+from typing import Any, Callable, Dict, Optional, Tuple, Union
 from urllib.parse import urlparse
 
 try:
-    from selenium import webdriver
-    from selenium.common.exceptions import (
-        ElementClickInterceptedException,
-        ElementNotInteractableException,
-        NoSuchElementException,
-        StaleElementReferenceException,
-        TimeoutException,
-        WebDriverException,
-    )
+    from selenium import webdriver  # type: ignore[import-not-found]
+    from selenium.common.exceptions import (ElementClickInterceptedException,
+                                            ElementNotInteractableException,
+                                            NoSuchElementException,
+                                            StaleElementReferenceException,
+                                            TimeoutException,
+                                            WebDriverException)
     from selenium.webdriver.chrome.options import Options
     from selenium.webdriver.chrome.service import Service
     from selenium.webdriver.common.by import By
     from selenium.webdriver.common.keys import Keys
     from selenium.webdriver.support import expected_conditions as EC
     from selenium.webdriver.support.ui import Select, WebDriverWait
+
     HAS_SELENIUM = True
 except ImportError:
     HAS_SELENIUM = False
-    webdriver = None
+    webdriver = None  # type: ignore[assignment]
     ElementClickInterceptedException = Exception  # type: ignore[misc,assignment]
     ElementNotInteractableException = Exception  # type: ignore[misc,assignment]
     NoSuchElementException = Exception  # type: ignore[misc,assignment]
@@ -68,7 +66,7 @@ except ImportError:
     WebDriverException = Exception  # type: ignore[misc,assignment]
     Options = None  # type: ignore[misc,assignment]
     Service = None  # type: ignore[misc,assignment]
-    By = None  # type: ignore[misc,assignment]
+    By = Any  # type: ignore[misc,assignment]
 
     class _KeysStub:
         ENTER = "ENTER"
@@ -147,6 +145,24 @@ return ((viewportOnly) => {
         }
         return true;
     }
+
+    // Security Pass 25: Auto-Dismiss Unwanted Overlays (Cookie banners, modals, GDPR popups)
+    const overlayKeywords = ['cookie', 'gdpr', 'consent', 'accept', 'got it', 'understand', 'dismiss', 'close', 'newsletter'];
+    document.querySelectorAll('button, a, [role="button"]').forEach(btn => {
+        const text = (btn.innerText || btn.getAttribute('aria-label') || '').toLowerCase();
+        if (!text) return;
+        const parentZIndex = parseInt(window.getComputedStyle(btn).zIndex) || 0;
+
+        // Match generic acceptance text, high zIndex typically means overlay
+        if (overlayKeywords.some(kw => text.includes(kw)) && (parentZIndex > 10 || btn.closest('[id*="cookie"], [class*="cookie"], [id*="banner"], [class*="banner"]'))) {
+            try {
+                const rect = btn.getBoundingClientRect();
+                if (rect.width > 0 && rect.height > 0) {
+                    btn.click(); // Auto-dismiss
+                }
+            } catch(e) {}
+        }
+    });
 
     // Clear previous markers from earlier turns
     document.querySelectorAll('[data-ai-id]').forEach(el => el.removeAttribute('data-ai-id'));
@@ -325,6 +341,29 @@ return ((viewportOnly) => {
 
 
 # ---------------------------------------------------------------------------
+# Exceptions & Error Hierarchy
+# ---------------------------------------------------------------------------
+class SSRFSecurityError(Exception):
+    """Raised when URL validation fails SSRF, loopback, or DNS rebinding checks."""
+    pass
+
+
+class ElementNotFoundError(Exception):
+    """Raised when an interactive element ID is not found in the DOM."""
+    pass
+
+
+class BrowserCrashError(Exception):
+    """Raised when the underlying Chromium process crashes or disconnects."""
+    pass
+
+
+class NavigationTimeoutError(Exception):
+    """Raised when page navigation exceeds the configured timeout."""
+    pass
+
+
+# ---------------------------------------------------------------------------
 # Data Models
 # ---------------------------------------------------------------------------
 @dataclass
@@ -383,7 +422,7 @@ class BrowserObservation:
             "</untrusted_web_snapshot>\n"
             "-----------------------------\n"
             "INSTRUCTIONS FOR AI AGENT:\n"
-            "- Interact with targets using their numeric ID: [ID:role \"label\"].\n"
+            '- Interact with targets using their numeric ID: [ID:role "label"].\n'
             "- To click a link or button: {'action': 'click', 'id': ID}\n"
             "- To fill text: {'action': 'type', 'id': ID, 'text': 'content', 'enter': False, 'clear': True}\n"
             "- To change dropdown: {'action': 'select', 'id': ID, 'value': 'option text'}\n"
@@ -472,10 +511,29 @@ class TokenOptimizedBrowser:
         options = Options()
         if self.headless:
             options.add_argument("--headless=new")
+
+        # Architecture Pass 10: Headless Memory Capping
+        options.add_argument("--js-flags=--max-old-space-size=256")
+        options.add_argument("--disable-background-networking")
+        options.add_argument("--disable-background-timer-throttling")
+        options.add_argument("--disable-backgrounding-occluded-windows")
+        options.add_argument("--disable-breakpad")
+        options.add_argument("--disable-client-side-phishing-detection")
+        options.add_argument("--disable-default-apps")
+        options.add_argument("--disable-hang-monitor")
+        options.add_argument("--disable-popup-blocking")
+        options.add_argument("--disable-prompt-on-repost")
+        options.add_argument("--disable-sync")
+        options.add_argument("--metrics-recording-only")
+        options.add_argument("--no-first-run")
+        options.add_argument("--safebrowsing-disable-auto-update")
+
         options.add_argument("--no-sandbox")
         options.add_argument("--disable-dev-shm-usage")
         options.add_argument("--disable-gpu")
-        options.add_argument(f"--window-size={self.window_size[0]},{self.window_size[1]}")
+        options.add_argument(
+            f"--window-size={self.window_size[0]},{self.window_size[1]}"
+        )
         options.add_argument("--disable-blink-features=AutomationControlled")
         options.add_argument("--disable-extensions")
         options.add_argument(
@@ -491,11 +549,12 @@ class TokenOptimizedBrowser:
         if self.chromedriver_path and os.path.exists(self.chromedriver_path):
             service = Service(executable_path=self.chromedriver_path)
         else:
-            service = Service()
+            service = Service()  # type: ignore[call-arg]
         self._service = service
 
         try:
-            self.driver = webdriver.Chrome(service=service, options=options)
+            # type ignore because types-selenium expects older arguments sometimes
+            self.driver = webdriver.Chrome(service=service, options=options)  # type: ignore[call-arg]
             self.driver.set_page_load_timeout(self.timeout)
             self.driver.implicitly_wait(0)  # Rely purely on explicit synchronization
             atexit.register(self.close)
@@ -541,11 +600,19 @@ class TokenOptimizedBrowser:
     def __exit__(self, exc_type, exc_val, exc_tb) -> None:
         self.close()
 
-    def _validate_safe_url(self, url: str) -> str:
+    def _validate_safe_url(self, url: str, redirect_depth: int = 0) -> str:
         """Validate URL scheme and verify destination IPs against SSRF/loopback/private ranges."""
+        # Security Pass 24: Max redirect depth check to prevent infinite SSRF redirect chains
+        if redirect_depth > 5:
+            raise SSRFSecurityError(f"Exceeded max redirect depth of 5 while navigating to {url}")
+
         trimmed = url.strip()
         trimmed_lower = trimmed.lower()
-        if trimmed.startswith("<") and ("<html" in trimmed_lower or "<body" in trimmed_lower or "<!doctype" in trimmed_lower):
+        if trimmed.startswith("<") and (
+            "<html" in trimmed_lower
+            or "<body" in trimmed_lower
+            or "<!doctype" in trimmed_lower
+        ):
             b64 = base64.b64encode(trimmed.encode("utf-8")).decode("utf-8")
             return f"data:text/html;base64,{b64}"
         elif trimmed.startswith("data:text/html;base64,"):
@@ -554,13 +621,13 @@ class TokenOptimizedBrowser:
         parsed = urlparse(trimmed)
         scheme = parsed.scheme.lower()
         if scheme not in ("http", "https"):
-            raise ValueError(
+            raise SSRFSecurityError(
                 f"Blocked navigation to disallowed scheme '{scheme}'. Only http, https, and data:text/html are allowed."
             )
 
         raw_host = (parsed.hostname or "").strip().rstrip(".").lower()
         if not raw_host:
-            raise ValueError("URL must have a valid hostname.")
+            raise SSRFSecurityError("URL must have a valid hostname.")
 
         # Block localhost, link-local, and cloud metadata names
         metadata_names = {
@@ -575,14 +642,20 @@ class TokenOptimizedBrowser:
             or raw_host.endswith(".local")
             or any(raw_host.endswith("." + m) for m in metadata_names)
         ):
-            raise ValueError(f"Blocked SSRF access to local or cloud metadata host '{raw_host}'.")
+            raise SSRFSecurityError(
+                f"Blocked SSRF access to local or cloud metadata host '{raw_host}'."
+            )
 
         # Disallow octal leading zeros or hexadecimal parts in dot-notation IPv4
         parts = raw_host.split(".")
         if len(parts) == 4 and all(p.isalnum() for p in parts):
             for p in parts:
-                if (p.startswith("0") and len(p) > 1 and p.isdigit()) or p.lower().startswith("0x"):
-                    raise ValueError(f"Blocked SSRF access to non-canonical numeric IP notation '{raw_host}'.")
+                if (
+                    p.startswith("0") and len(p) > 1 and p.isdigit()
+                ) or p.lower().startswith("0x"):
+                    raise SSRFSecurityError(
+                        f"Blocked SSRF access to non-canonical numeric IP notation '{raw_host}'."
+                    )
 
         # Resolve host to IP addresses and inspect each for private/loopback/link-local ranges
         def _check_ip(ip_obj: Union[ipaddress.IPv4Address, ipaddress.IPv6Address]):
@@ -595,7 +668,9 @@ class TokenOptimizedBrowser:
                 or ip_obj.is_multicast
                 or str(ip_obj) in ("169.254.169.254", "0.0.0.0")
             ):
-                raise ValueError(f"Blocked SSRF access to prohibited IP address '{ip_obj}'.")
+                raise SSRFSecurityError(
+                    f"Blocked SSRF access to prohibited IP address '{ip_obj}'."
+                )
             # Check IPv4-mapped IPv6 addresses (e.g. ::ffff:169.254.169.254)
             mapped = getattr(ip_obj, "ipv4_mapped", None)
             if mapped:
@@ -632,48 +707,74 @@ class TokenOptimizedBrowser:
                 resolved_ip = ipaddress.ip_address(ip_str)
                 _check_ip(resolved_ip)
         except socket.gaierror as e:
-            raise ValueError(f"Failed to resolve host '{raw_host}': {str(e)}")
+            raise SSRFSecurityError(f"Failed to resolve host '{raw_host}': {str(e)}")
 
         return trimmed
 
-    def goto(self, url: str) -> BrowserObservation:
+    def goto(self, url: str, redirect_depth: int = 0) -> BrowserObservation:
         """Navigate to URL or load raw HTML via base64 data URI with strict SSRF & DNS rebinding validation."""
         if not self.driver:
             self.start()
 
-        safe_target = self._validate_safe_url(url)
-        self.driver.get(safe_target)
+        safe_target = self._validate_safe_url(url, redirect_depth=redirect_depth)
+        self.driver.get(safe_target)  # type: ignore[union-attr]
         self._wait_for_dom_ready()
 
         # Validate post-redirect final destination against SSRF
-        final_url = self.driver.current_url or ""
-        if final_url and not final_url.startswith("data:"):
+        final_url = self.driver.current_url or ""  # type: ignore[union-attr]
+        if final_url and not final_url.startswith("data:") and final_url != safe_target:
             try:
-                self._validate_safe_url(final_url)
+                self._validate_safe_url(final_url, redirect_depth=redirect_depth + 1)
             except Exception as e:
                 try:
-                    self.driver.get("about:blank")
+                    self.driver.get("about:blank")  # type: ignore[union-attr]
                 except Exception:
                     pass
-                raise ValueError(f"Post-redirect navigation blocked by SSRF protection ({str(e)}): {final_url}")
+                raise SSRFSecurityError(
+                    f"Post-redirect navigation blocked by SSRF protection ({str(e)}): {final_url}"
+                )
 
         return self.get_state()
 
     def _wait_for_dom_ready(self) -> None:
+        """Wait for DOM readiness including MutationObserver quiescence."""
         if not self.driver:
             return
         try:
             wait = WebDriverWait(
                 self.driver,
                 self.timeout,
-                ignored_exceptions=(WebDriverException, NoSuchElementException, StaleElementReferenceException),
+                ignored_exceptions=(
+                    WebDriverException,
+                    NoSuchElementException,
+                    StaleElementReferenceException,
+                ),
             )
+            # Basic ready state
             wait.until(
-                lambda d: d.execute_script("return document.readyState") in ("complete", "interactive")
+                lambda d: d.execute_script("return document.readyState")
+                in ("complete", "interactive")
             )
+
+            # Quiescence wait using MutationObserver to detect when the DOM stops changing
+            quiescence_script = """
+            var callback = arguments[arguments.length - 1];
+            if (document.readyState !== 'complete') {
+                window.addEventListener('load', function() {
+                    requestIdleCallback(() => callback(true), {timeout: 2000});
+                });
+            } else if (window.requestIdleCallback) {
+                requestIdleCallback(() => callback(true), {timeout: 2000});
+            } else {
+                setTimeout(() => callback(true), 50);
+            }
+            """
+            try:
+                self.driver.execute_async_script(quiescence_script)
+            except Exception:
+                time.sleep(0.1) # fallback wait
         except (TimeoutException, Exception):
-            pass
-        time.sleep(0.15)
+            time.sleep(0.15) # fallback if anything fails entirely
 
     def get_state(self) -> BrowserObservation:
         """
@@ -722,10 +823,14 @@ class TokenOptimizedBrowser:
     def _find_ai_element(self, element_id: Union[int, str]):
         str_id = str(element_id).strip()
         if not str_id.isdigit():
-            raise ValueError(f"Invalid element ID '{element_id}'. Element ID must be a positive integer.")
-        elements = self.driver.find_elements(By.CSS_SELECTOR, f'[data-ai-id="{str_id}"]')
+            raise ElementNotFoundError(
+                f"Invalid element ID '{element_id}'. Element ID must be a positive integer."
+            )
+        elements = self.driver.find_elements(  # type: ignore[union-attr]
+            By.CSS_SELECTOR, f'[data-ai-id="{str_id}"]'
+        )
         if not elements:
-            raise NoSuchElementException(
+            raise ElementNotFoundError(
                 f"Element [{element_id}] not found on page. The page structure may have changed. "
                 "Call get_state() to re-index."
             )
@@ -749,7 +854,9 @@ class TokenOptimizedBrowser:
 
         def _do_click():
             el = self._find_ai_element(element_id)
-            self.driver.execute_script("arguments[0].scrollIntoView({block: 'center', inline: 'center'});", el)
+            self.driver.execute_script(
+                "arguments[0].scrollIntoView({block: 'center', inline: 'center'});", el
+            )
             time.sleep(0.1)
             try:
                 el.click()
@@ -761,7 +868,10 @@ class TokenOptimizedBrowser:
         try:
             return self._retry_action(_do_click)
         except Exception as e:
-            return {"status": "error", "message": f"Failed to click [{element_id}]: {str(e)}"}
+            return {
+                "status": "error",
+                "message": f"Failed to click [{element_id}]: {str(e)}",
+            }
 
     def type_text(
         self,
@@ -776,7 +886,9 @@ class TokenOptimizedBrowser:
 
         def _do_type():
             el = self._find_ai_element(element_id)
-            self.driver.execute_script("arguments[0].scrollIntoView({block: 'center', inline: 'center'});", el)
+            self.driver.execute_script(
+                "arguments[0].scrollIntoView({block: 'center', inline: 'center'});", el
+            )
             time.sleep(0.05)
 
             if clear:
@@ -802,7 +914,9 @@ class TokenOptimizedBrowser:
                     r"pin|passcode|otp|totp|mfa|2fa|cc-|current-password|new-password|one-time-code"
                 )
                 inspect_blob = f"{inp_name} {inp_id} {inp_auto} {inp_place} {inp_aria}"
-                if inp_type in ("password", "hidden") or re.search(sens_pattern, inspect_blob):
+                if inp_type in ("password", "hidden") or re.search(
+                    sens_pattern, inspect_blob
+                ):
                     is_sensitive = True
             except Exception:
                 pass
@@ -816,9 +930,14 @@ class TokenOptimizedBrowser:
         try:
             return self._retry_action(_do_type)
         except Exception as e:
-            return {"status": "error", "message": f"Failed to type into [{element_id}]: {str(e)}"}
+            return {
+                "status": "error",
+                "message": f"Failed to type into [{element_id}]: {str(e)}",
+            }
 
-    def select_option(self, element_id: Union[int, str], value_or_text: str) -> Dict[str, Any]:
+    def select_option(
+        self, element_id: Union[int, str], value_or_text: str
+    ) -> Dict[str, Any]:
         """Select an option in a dropdown <select> or custom ARIA combobox with injection-safe query and stale-ref recovery."""
         if not self.driver:
             raise RuntimeError("Browser not running")
@@ -854,7 +973,10 @@ class TokenOptimizedBrowser:
                 if not is_expanded:
                     try:
                         el.click()
-                    except (ElementClickInterceptedException, ElementNotInteractableException):
+                    except (
+                        ElementClickInterceptedException,
+                        ElementNotInteractableException,
+                    ):
                         self.driver.execute_script("arguments[0].click();", el)
                     time.sleep(0.15)
 
@@ -907,16 +1029,23 @@ class TokenOptimizedBrowser:
         try:
             return self._retry_action(_do_select)
         except Exception as e:
-            return {"status": "error", "message": f"Failed to select in [{element_id}]: {str(e)}"}
+            return {
+                "status": "error",
+                "message": f"Failed to select in [{element_id}]: {str(e)}",
+            }
 
-    def set_checkbox(self, element_id: Union[int, str], checked: bool = True) -> Dict[str, Any]:
+    def set_checkbox(
+        self, element_id: Union[int, str], checked: bool = True
+    ) -> Dict[str, Any]:
         """Toggle or set a checkbox / radio button state with scroll, JS fallback, and stale-ref recovery."""
         if not self.driver:
             raise RuntimeError("Browser not running")
 
         def _do_checkbox():
             el = self._find_ai_element(element_id)
-            self.driver.execute_script("arguments[0].scrollIntoView({block: 'center', inline: 'center'});", el)
+            self.driver.execute_script(
+                "arguments[0].scrollIntoView({block: 'center', inline: 'center'});", el
+            )
             time.sleep(0.05)
 
             is_checked = (
@@ -927,7 +1056,10 @@ class TokenOptimizedBrowser:
             if is_checked != checked:
                 try:
                     el.click()
-                except (ElementClickInterceptedException, ElementNotInteractableException):
+                except (
+                    ElementClickInterceptedException,
+                    ElementNotInteractableException,
+                ):
                     self.driver.execute_script("arguments[0].click();", el)
 
             self._wait_for_dom_ready()
@@ -939,7 +1071,10 @@ class TokenOptimizedBrowser:
         try:
             return self._retry_action(_do_checkbox)
         except Exception as e:
-            return {"status": "error", "message": f"Failed to set checkbox [{element_id}]: {str(e)}"}
+            return {
+                "status": "error",
+                "message": f"Failed to set checkbox [{element_id}]: {str(e)}",
+            }
 
     def press_key(self, key_name: str) -> Dict[str, Any]:
         """Send keyboard control keys (Enter, Tab, Escape, ArrowDown, etc.) with stale-ref recovery."""
@@ -982,7 +1117,10 @@ class TokenOptimizedBrowser:
         try:
             return self._retry_action(_do_press)
         except Exception as e:
-            return {"status": "error", "message": f"Failed to press key '{key_name}': {str(e)}"}
+            return {
+                "status": "error",
+                "message": f"Failed to press key '{key_name}': {str(e)}",
+            }
 
     def scroll(self, direction: str = "down", amount: int = 600) -> BrowserObservation:
         """Scroll window up or down instantly for deterministic observation."""
@@ -991,10 +1129,14 @@ class TokenOptimizedBrowser:
 
         dir_lower = direction.strip().lower()
         if dir_lower not in ("down", "up"):
-            raise ValueError(f"Invalid scroll direction '{direction}'. Must be 'down' or 'up'.")
+            raise ValueError(
+                f"Invalid scroll direction '{direction}'. Must be 'down' or 'up'."
+            )
 
         delta = amount if dir_lower == "down" else -amount
-        self.driver.execute_script(f"window.scrollBy({{top: {delta}, behavior: 'auto'}});")
+        self.driver.execute_script(
+            f"window.scrollBy({{top: {delta}, behavior: 'auto'}});"
+        )
         time.sleep(0.15)
         return self.get_state()
 
@@ -1041,7 +1183,11 @@ class TokenOptimizedBrowser:
                         "observation": None,
                     }
                 res = self.click(eid)
-                obs = self.get_state() if res["status"] == "success" else self._last_observation
+                obs = (
+                    self.get_state()
+                    if res["status"] == "success"
+                    else self._last_observation  # type: ignore[assignment]
+                )
                 return {
                     "status": res["status"],
                     "action": "click",
@@ -1062,10 +1208,16 @@ class TokenOptimizedBrowser:
                 if text_val is None:
                     text_val = action.get("value", "")
                 text = str(text_val)
-                press_enter = str(action.get("enter", action.get("press_enter", False))).lower() in ("true", "1", "yes")
+                press_enter = str(
+                    action.get("enter", action.get("press_enter", False))
+                ).lower() in ("true", "1", "yes")
                 clear = str(action.get("clear", True)).lower() in ("true", "1", "yes")
                 res = self.type_text(eid, text, clear=clear, press_enter=press_enter)
-                obs = self.get_state() if res["status"] == "success" else self._last_observation
+                obs = (
+                    self.get_state()
+                    if res["status"] == "success"
+                    else self._last_observation  # type: ignore[assignment]
+                )
                 return {
                     "status": res["status"],
                     "action": "type",
@@ -1094,7 +1246,11 @@ class TokenOptimizedBrowser:
                     }
                 val = str(val_raw).strip()
                 res = self.select_option(eid, val)
-                obs = self.get_state() if res["status"] == "success" else self._last_observation
+                obs = (
+                    self.get_state()
+                    if res["status"] == "success"
+                    else self._last_observation  # type: ignore[assignment]
+                )
                 return {
                     "status": res["status"],
                     "action": "select",
@@ -1111,9 +1267,17 @@ class TokenOptimizedBrowser:
                         "message": "Missing 'id' parameter for checkbox action",
                         "observation": None,
                     }
-                checked = str(action.get("checked", True)).lower() in ("true", "1", "yes")
+                checked = str(action.get("checked", True)).lower() in (
+                    "true",
+                    "1",
+                    "yes",
+                )
                 res = self.set_checkbox(eid, checked)
-                obs = self.get_state() if res["status"] == "success" else self._last_observation
+                obs = (
+                    self.get_state()
+                    if res["status"] == "success"
+                    else self._last_observation  # type: ignore[assignment]
+                )
                 return {
                     "status": res["status"],
                     "action": "checkbox",
@@ -1136,7 +1300,11 @@ class TokenOptimizedBrowser:
             elif act in ("key", "press_key"):
                 key_name = str(action.get("key") or "enter").lower()
                 res = self.press_key(key_name)
-                obs = self.get_state() if res["status"] == "success" else self._last_observation
+                obs = (
+                    self.get_state()
+                    if res["status"] == "success"
+                    else self._last_observation  # type: ignore[assignment]
+                )
                 return {
                     "status": res["status"],
                     "action": "key",
@@ -1180,7 +1348,16 @@ def get_tool_definition(format_type: str = "openai") -> Dict[str, Any]:
     properties = {
         "action": {
             "type": "string",
-            "enum": ["goto", "click", "type", "select", "checkbox", "scroll", "key", "state"],
+            "enum": [
+                "goto",
+                "click",
+                "type",
+                "select",
+                "checkbox",
+                "scroll",
+                "key",
+                "state",
+            ],
             "description": "Browser action to execute.",
         },
         "url": {
@@ -1291,7 +1468,9 @@ def run_interactive_repl(
     print("  exit / quit          - Quit REPL")
     print("=" * 65)
 
-    with TokenOptimizedBrowser(headless=headless, viewport_only=viewport_only) as browser:
+    with TokenOptimizedBrowser(
+        headless=headless, viewport_only=viewport_only
+    ) as browser:
         if initial_url:
             print(f"Loading {initial_url}...")
             obs = browser.goto(initial_url)
@@ -1328,6 +1507,11 @@ def run_interactive_repl(
             elif cmd == "type" and len(parts) > 2:
                 eid = parts[1]
                 text = parts[2]
+
+                # Security Pass 29: Strict Secret Masking in REPL Logs
+                # Do not echo the actual text content back into the shell history or output
+                print(f"Executing type_text on [{eid}] with length={len(text)} ...")
+
                 res = browser.type_text(eid, text)
                 print(f"Result: {res.get('message')}")
                 obs = browser.get_state()
@@ -1340,7 +1524,11 @@ def run_interactive_repl(
                 print(f"\n{obs.snapshot}")
 
             elif cmd == "check" and len(parts) > 1:
-                checked = True if len(parts) == 2 or parts[2].lower() in ("true", "1", "yes") else False
+                checked = (
+                    True
+                    if len(parts) == 2 or parts[2].lower() in ("true", "1", "yes")
+                    else False
+                )
                 res = browser.set_checkbox(parts[1], checked)
                 print(f"Result: {res.get('message')}")
                 obs = browser.get_state()
@@ -1437,23 +1625,35 @@ def run_demo():
         print("\n2. Compact LLM Observation Prompt:")
         print(obs.to_agent_prompt())
 
-        print("3. Executing Simulated AI Step 1: Type 'BATCH-104' into Search Input (ID 4)...")
-        res_type = browser.execute_action({"action": "type", "id": 4, "text": "BATCH-104"})
+        print(
+            "3. Executing Simulated AI Step 1: Type 'BATCH-104' into Search Input (ID 4)..."
+        )
+        res_type = browser.execute_action(
+            {"action": "type", "id": 4, "text": "BATCH-104"}
+        )
         print(f"   {res_type.get('message')}")
 
-        print("4. Executing Simulated AI Step 2: Click 'Search Batches' Button (ID 5)...")
+        print(
+            "4. Executing Simulated AI Step 2: Click 'Search Batches' Button (ID 5)..."
+        )
         res_click = browser.execute_action({"action": "click", "id": 5})
         print(f"   {res_click.get('message')}")
 
-        print("5. Executing Simulated AI Step 3: Change Flour Dropdown (ID 6) to 'Dark Rye'...")
-        res_select = browser.execute_action({"action": "select", "id": 6, "value": "rye"})
+        print(
+            "5. Executing Simulated AI Step 3: Change Flour Dropdown (ID 6) to 'Dark Rye'..."
+        )
+        res_select = browser.execute_action(
+            {"action": "select", "id": 6, "value": "rye"}
+        )
         print(f"   {res_select.get('message')}")
 
         updated = browser.get_state()
         print("\n6. Updated Snapshot After Actions:")
         print(updated.snapshot)
 
-    print("\n✅ Verification successful! Browser controller executed cleanly with zero errors.")
+    print(
+        "\n✅ Verification successful! Browser controller executed cleanly with zero errors."
+    )
 
 
 def main():
@@ -1461,12 +1661,34 @@ def main():
         description="Token-Optimized AI Chromium Browser Controller"
     )
     parser.add_argument("--url", type=str, help="Target URL to inspect")
-    parser.add_argument("--demo", action="store_true", help="Run benchmark demonstration")
-    parser.add_argument("--interactive", action="store_true", help="Launch interactive terminal REPL")
-    parser.add_argument("--schema", action="store_true", help="Output LLM tool schema in JSON format")
-    parser.add_argument("--format", type=str, default="openai", choices=["openai", "gemini", "anthropic"], help="Tool schema format")
-    parser.add_argument("--viewport-only", action="store_true", help="Only extract elements visible in scroll viewport")
-    parser.add_argument("--no-headless", action="store_false", dest="headless", default=True, help="Run browser with visible window")
+    parser.add_argument(
+        "--demo", action="store_true", help="Run benchmark demonstration"
+    )
+    parser.add_argument(
+        "--interactive", action="store_true", help="Launch interactive terminal REPL"
+    )
+    parser.add_argument(
+        "--schema", action="store_true", help="Output LLM tool schema in JSON format"
+    )
+    parser.add_argument(
+        "--format",
+        type=str,
+        default="openai",
+        choices=["openai", "gemini", "anthropic"],
+        help="Tool schema format",
+    )
+    parser.add_argument(
+        "--viewport-only",
+        action="store_true",
+        help="Only extract elements visible in scroll viewport",
+    )
+    parser.add_argument(
+        "--no-headless",
+        action="store_false",
+        dest="headless",
+        default=True,
+        help="Run browser with visible window",
+    )
 
     args = parser.parse_args()
 
@@ -1475,7 +1697,9 @@ def main():
         return
 
     if args.interactive:
-        run_interactive_repl(args.url, headless=args.headless, viewport_only=args.viewport_only)
+        run_interactive_repl(
+            args.url, headless=args.headless, viewport_only=args.viewport_only
+        )
         return
 
     if args.demo or not args.url:
@@ -1483,7 +1707,9 @@ def main():
         return
 
     print(f"Navigating Chromium to {args.url}...")
-    with TokenOptimizedBrowser(headless=args.headless, viewport_only=args.viewport_only) as browser:
+    with TokenOptimizedBrowser(
+        headless=args.headless, viewport_only=args.viewport_only
+    ) as browser:
         obs = browser.goto(args.url)
         print("\n" + "=" * 55)
         print(obs.token_stats.summary())
